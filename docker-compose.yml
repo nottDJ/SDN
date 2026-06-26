@@ -1,0 +1,93 @@
+version: "3.9"
+
+services:
+  # ──────────────────────────────────────────────
+  # PostgreSQL Database
+  # ──────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: sdn-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sdn_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sdn_secure_pass_2024}
+      POSTGRES_DB: ${POSTGRES_DB:-sdn_traffic_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sdn_admin}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sdn-network
+
+  # ──────────────────────────────────────────────
+  # FastAPI Backend
+  # ──────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sdn-backend
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - model_data:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - sdn-network
+
+  # ──────────────────────────────────────────────
+  # Next.js Frontend
+  # ──────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sdn-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_WS_URL: ws://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - sdn-network
+
+  # ──────────────────────────────────────────────
+  # Ryu SDN Controller
+  # ──────────────────────────────────────────────
+  ryu-controller:
+    build:
+      context: ./ryu_controller
+      dockerfile: Dockerfile
+    container_name: sdn-ryu
+    restart: unless-stopped
+    ports:
+      - "6633:6633"   # OpenFlow
+      - "8080:8080"   # REST API
+    networks:
+      - sdn-network
+
+volumes:
+  postgres_data:
+  model_data:
+
+networks:
+  sdn-network:
+    driver: bridge
