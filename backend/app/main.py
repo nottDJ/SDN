@@ -86,6 +86,7 @@ from app.api.alerts import router as alerts_router
 from app.api.reports import router as reports_router
 from app.api.simulation import router as simulation_router
 from app.api.training import router as training_router
+from app.api.routing import router as routing_router
 from app.api.websocket import router as ws_router
 
 app.include_router(auth_router, prefix="/api")
@@ -97,6 +98,7 @@ app.include_router(alerts_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
 app.include_router(simulation_router, prefix="/api")
 app.include_router(training_router, prefix="/api")
+app.include_router(routing_router, prefix="/api")
 app.include_router(ws_router)
 
 

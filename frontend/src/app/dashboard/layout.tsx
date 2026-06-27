@@ -1,11 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '@/stores/authStore';
-import { useWebSocket } from '@/hooks/useWebSocket';
+import { useTrafficStore } from '@/stores/trafficStore';
+import { toast } from '@/stores/toastStore';
+import ToastContainer from '@/components/ToastContainer';
 import {
   LayoutDashboard, Network, Activity, Brain, GitBranch,
   Bell, FileText, GraduationCap, Play, Settings, Cpu,
@@ -26,25 +28,80 @@ const navItems = [
   { href: '/dashboard/settings', label: 'Settings', icon: Settings },
 ];
 
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000';
+
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [alertCount, setAlertCount] = useState(0);
   const router = useRouter();
   const pathname = usePathname();
-  const { user, isAuthenticated, logout } = useAuthStore();
+  const { user, logout } = useAuthStore();
+  const addDataPoint = useTrafficStore((s) => s.addDataPoint);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectRef = useRef<NodeJS.Timeout | undefined>(undefined);
 
-  // Connect WebSocket
-  useWebSocket();
+  // Fetch unacknowledged alert count
+  useEffect(() => {
+    const fetchAlertCount = async () => {
+      try {
+        const token = localStorage.getItem('access_token');
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/alerts/summary`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setAlertCount(data.total_unacknowledged || 0);
+        }
+      } catch { /* silent fail */ }
+    };
+    fetchAlertCount();
+    const iv = setInterval(fetchAlertCount, 15000);
+    return () => clearInterval(iv);
+  }, []);
 
+  // WebSocket connection
   useEffect(() => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
-    if (!token) router.push('/login');
-  }, [router]);
+    if (!token) { router.push('/login'); return; }
 
-  const handleLogout = () => {
-    logout();
-    router.push('/login');
-  };
+    const connect = () => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) return;
+      try {
+        const ws = new WebSocket(`${WS_URL}/ws/traffic`);
+        ws.onopen = () => ws.send(JSON.stringify({ action: 'ping' }));
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'traffic_update') addDataPoint(msg.data as any);
+            if (msg.type === 'alert') {
+              const d = msg.data as { severity: string; message: string };
+              if (d.severity === 'warning') toast.warning('Network Alert', d.message);
+              else if (d.severity === 'critical') toast.error('Critical Alert', d.message);
+              else toast.info('Alert', d.message);
+              setAlertCount((c) => c + 1);
+            }
+            if (msg.type === 'prediction_update' && msg.data?.congestion) {
+              toast.warning('Congestion Predicted', 'AI model detected imminent congestion — rerouting...');
+            }
+          } catch { /* ignore */ }
+        };
+        ws.onclose = () => { reconnectRef.current = setTimeout(connect, 3000); };
+        ws.onerror = () => ws.close();
+        wsRef.current = ws;
+      } catch {
+        reconnectRef.current = setTimeout(connect, 3000);
+      }
+    };
+
+    connect();
+    return () => {
+      clearTimeout(reconnectRef.current);
+      wsRef.current?.close();
+    };
+  }, [router, addDataPoint]);
+
+  const handleLogout = () => { logout(); router.push('/login'); };
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -67,9 +124,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           {navItems.map((item) => {
             const isActive = pathname === item.href || (item.href !== '/dashboard' && pathname.startsWith(item.href));
             return (
-              <Link key={item.href} href={item.href} className={`sidebar-item ${isActive ? 'active' : ''}`} title={item.label}>
+              <Link key={item.href} href={item.href} className={`sidebar-item ${isActive ? 'active' : ''} relative`} title={item.label}>
                 <item.icon className="w-4 h-4 flex-shrink-0" />
                 {!collapsed && <span>{item.label}</span>}
+                {/* Alert badge */}
+                {item.href === '/dashboard/alerts' && alertCount > 0 && (
+                  <span className={`${collapsed ? 'absolute top-1 right-1' : 'ml-auto'} min-w-5 h-5 px-1 rounded-full bg-rose-500 text-white text-xs flex items-center justify-center font-bold`}>
+                    {alertCount > 99 ? '99+' : alertCount}
+                  </span>
+                )}
               </Link>
             );
           })}
@@ -77,6 +140,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         {/* Footer */}
         <div className="p-2 border-t border-white/5">
+          {!collapsed && user && (
+            <div className="flex items-center gap-2 px-3 py-2 mb-1">
+              <div className="w-6 h-6 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center">
+                <User className="w-3 h-3 text-white" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-semibold truncate">{user.username}</div>
+                <div className="text-xs text-slate-500 capitalize">{user.role}</div>
+              </div>
+            </div>
+          )}
           <button onClick={() => setCollapsed(!collapsed)} className="sidebar-item w-full justify-center">
             <ChevronLeft className={`w-4 h-4 transition-transform ${collapsed ? 'rotate-180' : ''}`} />
           </button>
@@ -93,7 +167,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <Menu className="w-5 h-5" />
         </button>
         <span className="font-bold text-sm bg-gradient-to-r from-cyan-400 to-blue-400 bg-clip-text text-transparent">SDN Manager</span>
-        <User className="w-5 h-5 text-slate-400" />
+        <div className="relative">
+          <Bell className="w-5 h-5 text-slate-400" />
+          {alertCount > 0 && (
+            <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 text-white text-xs flex items-center justify-center font-bold">
+              {alertCount > 9 ? '9+' : alertCount}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* ── Mobile Sidebar Overlay ── */}
@@ -106,9 +187,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 {navItems.map((item) => {
                   const isActive = pathname === item.href;
                   return (
-                    <Link key={item.href} href={item.href} className={`sidebar-item ${isActive ? 'active' : ''}`} onClick={() => setMobileOpen(false)}>
+                    <Link key={item.href} href={item.href} className={`sidebar-item ${isActive ? 'active' : ''} relative`} onClick={() => setMobileOpen(false)}>
                       <item.icon className="w-4 h-4" />
                       <span>{item.label}</span>
+                      {item.href === '/dashboard/alerts' && alertCount > 0 && (
+                        <span className="ml-auto min-w-5 h-5 px-1 rounded-full bg-rose-500 text-white text-xs flex items-center justify-center font-bold">
+                          {alertCount > 99 ? '99+' : alertCount}
+                        </span>
+                      )}
                     </Link>
                   );
                 })}
@@ -124,6 +210,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           {children}
         </motion.div>
       </main>
+
+      {/* ── Toast Notifications ── */}
+      <ToastContainer />
     </div>
   );
 }
